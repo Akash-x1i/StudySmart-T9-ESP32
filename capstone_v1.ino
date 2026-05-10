@@ -59,6 +59,38 @@ int mcpPinToKeyIndex(int pin) {
   }
 }
 
+// ── Screen states ────────────────────────────────────
+enum ScreenState {
+  HOME_SCREEN,
+  APP_MENU,
+  NOTEPAD_LIST,
+  NOTEPAD_VIEW,
+  NOTEPAD_EDIT,
+  NOTEPAD_MENU
+};
+
+ScreenState currentScreen = HOME_SCREEN;
+int selectedApp = 0;  // for app menu selection
+
+// ── Note storage ──────────────────────────────────────
+#define MAX_NOTES     10
+#define NOTE_NAME_LEN 20
+#define NOTE_CONTENT_LEN 200
+
+struct Note {
+  char name[NOTE_NAME_LEN + 1];
+  char content[NOTE_CONTENT_LEN + 1];
+  int contentLen;
+};
+
+Note notes[MAX_NOTES];
+int totalNotes = 0;
+int selectedNoteIdx = 0;
+int menuSelectedIdx = 0;  // for context menus
+char editBuffer[NOTE_CONTENT_LEN + 1] = "";
+int editBufLen = 0;
+int editCursorPos = 0;
+
 // ── Display / text state ───────────────────────────────
 #define MAX_LEN       100
 #define COMMIT_DELAY  600   // ms before character is committed
@@ -67,16 +99,59 @@ int mcpPinToKeyIndex(int pin) {
 #define CHAR_W        6     // default font width
 #define CHAR_H        8     // default font height
 #define LINE_H        10
-#define SCREEN_W      128
-#define SCREEN_H      160
+#define SCREEN_W      160
+#define SCREEN_H      128
 #define CHARS_PER_LINE ((SCREEN_W - TEXT_X * 2) / CHAR_W)  // ~20
 
-char    inputBuf[MAX_LEN + 1] = "";  // committed text
-int     bufLen       = 0;
-int     cursorPos    = 0;
 int     pendingKey   = -1;           // keyMap index of key being cycled
 int     pendingIdx   = 0;            // which char in keyMap[pendingKey] is showing
 unsigned long lastKeyTime = 0;
+
+// ── Apps list ────────────────────────────────────────
+const char* apps[] = {"Notepad"};
+const int numApps = 1;
+
+// ── Note management functions ─────────────────────────
+void initializeNotes() {
+  // Create a default note
+  strcpy(notes[0].name, "Note 1");
+  strcpy(notes[0].content, "Welcome to Notepad");
+  notes[0].contentLen = strlen(notes[0].content);
+  totalNotes = 1;
+}
+
+void createNewNote() {
+  if (totalNotes >= MAX_NOTES) return;
+  char newName[NOTE_NAME_LEN + 1];
+  sprintf(newName, "Note %d", totalNotes + 1);
+  strcpy(notes[totalNotes].name, newName);
+  notes[totalNotes].content[0] = '\0';
+  notes[totalNotes].contentLen = 0;
+  totalNotes++;
+}
+
+void deleteNote(int idx) {
+  if (idx < 0 || idx >= totalNotes) return;
+  for (int i = idx; i < totalNotes - 1; i++) {
+    strcpy(notes[i].name, notes[i + 1].name);
+    strcpy(notes[i].content, notes[i + 1].content);
+    notes[i].contentLen = notes[i + 1].contentLen;
+  }
+  totalNotes--;
+  if (selectedNoteIdx >= totalNotes) selectedNoteIdx = totalNotes - 1;
+}
+
+void renameNote(int idx, const char* newName) {
+  if (idx < 0 || idx >= totalNotes) return;
+  strncpy(notes[idx].name, newName, NOTE_NAME_LEN);
+  notes[idx].name[NOTE_NAME_LEN] = '\0';
+}
+
+void saveNote(int idx) {
+  if (idx < 0 || idx >= totalNotes) return;
+  strcpy(notes[idx].content, editBuffer);
+  notes[idx].contentLen = editBufLen;
+}
 
 void beep(int ms = 30) {
   digitalWrite(BUZZER, HIGH);
@@ -84,11 +159,12 @@ void beep(int ms = 30) {
   digitalWrite(BUZZER, LOW);
 }
 
-int getCursorX(int pos) {
+// Cursor position helpers for edit buffer
+int getEditCursorX(int pos) {
   int x = TEXT_X;
   int col = 0;
-  for(int i = 0; i < pos && i < bufLen; i++) {
-    if(inputBuf[i] == '\n') {
+  for(int i = 0; i < pos && i < editBufLen; i++) {
+    if(editBuffer[i] == '\n') {
       x = TEXT_X;
       col = 0;
     } else {
@@ -103,11 +179,11 @@ int getCursorX(int pos) {
   return x;
 }
 
-int getCursorY(int pos) {
-  int y = 16;
+int getEditCursorY(int pos) {
+  int y = 20;
   int col = 0;
-  for(int i = 0; i < pos && i < bufLen; i++) {
-    if(inputBuf[i] == '\n') {
+  for(int i = 0; i < pos && i < editBufLen; i++) {
+    if(editBuffer[i] == '\n') {
       y += LINE_H;
       col = 0;
     } else {
@@ -121,11 +197,11 @@ int getCursorY(int pos) {
   return y;
 }
 
-int getLineStart(int pos) {
+int getEditLineStart(int pos) {
   int start = 0;
   int col = 0;
-  for(int i = 0; i < pos && i < bufLen; i++) {
-    if(inputBuf[i] == '\n') {
+  for(int i = 0; i < pos && i < editBufLen; i++) {
+    if(editBuffer[i] == '\n') {
       start = i + 1;
       col = 0;
     } else {
@@ -139,10 +215,10 @@ int getLineStart(int pos) {
   return start;
 }
 
-int getLineLength(int start) {
+int getEditLineLength(int start) {
   int len = 0;
   int col = 0;
-  for(int i = start; i < bufLen && inputBuf[i] != '\n'; i++) {
+  for(int i = start; i < editBufLen && editBuffer[i] != '\n'; i++) {
     len++;
     col++;
     if(col >= CHARS_PER_LINE) break;
@@ -150,51 +226,96 @@ int getLineLength(int start) {
   return len;
 }
 
-void moveCursorUp() {
-  if (cursorPos == 0) return;
-  int currentLineStart = getLineStart(cursorPos);
+void moveEditCursorUp() {
+  if (editCursorPos == 0) return;
+  int currentLineStart = getEditLineStart(editCursorPos);
   if (currentLineStart == 0) return;
-  int prevLineStart = getLineStart(currentLineStart - 1);
-  int column = cursorPos - currentLineStart;
-  int prevLineLen = getLineLength(prevLineStart);
-  cursorPos = prevLineStart + min(column, prevLineLen);
+  int prevLineStart = getEditLineStart(currentLineStart - 1);
+  int column = editCursorPos - currentLineStart;
+  int prevLineLen = getEditLineLength(prevLineStart);
+  editCursorPos = prevLineStart + min(column, prevLineLen);
 }
 
-void moveCursorDown() {
-  int currentLineStart = getLineStart(cursorPos);
-  int currentLineLen = getLineLength(currentLineStart);
+void moveEditCursorDown() {
+  int currentLineStart = getEditLineStart(editCursorPos);
+  int currentLineLen = getEditLineLength(currentLineStart);
   int nextLineStart = currentLineStart + currentLineLen;
-  if (nextLineStart >= bufLen) return;
-  if (inputBuf[nextLineStart] == '\n') nextLineStart++;
-  int column = cursorPos - currentLineStart;
-  int nextLineLen = getLineLength(nextLineStart);
-  cursorPos = nextLineStart + min(column, nextLineLen);
+  if (nextLineStart >= editBufLen) return;
+  if (editBuffer[nextLineStart] == '\n') nextLineStart++;
+  int column = editCursorPos - currentLineStart;
+  int nextLineLen = getEditLineLength(nextLineStart);
+  editCursorPos = nextLineStart + min(column, nextLineLen);
 }
 
-// ── Redraw full display ────────────────────────────────
-void redrawDisplay() {
+// ── Redraw note list screen ─────────────────────────────
+void redrawNoteList() {
   tft.fillScreen(ST77XX_BLACK);
-
+  
   // Title bar
-  tft.fillRect(0, 0, SCREEN_H, 12, ST77XX_BLUE);
+  tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(4, 2);
-  tft.print("         Notepad");
-
-  // Text area
+  tft.setCursor(40, 2);
+  tft.print("Notes");
+  
+  // Draw create option
+  int y = 18;
+  tft.setTextSize(1);
+  if (selectedNoteIdx == totalNotes) {
+    tft.fillRect(2, y, SCREEN_W - 4, 10, ST77XX_CYAN);
+    tft.setTextColor(ST77XX_BLACK);
+  } else {
+    tft.setTextColor(ST77XX_WHITE);
+  }
+  tft.setCursor(10, y + 1);
+  tft.print("+ Create Note");
+  tft.setTextColor(ST77XX_WHITE);
+  
+  // Draw notes list
+  y = 32;
+  for (int i = totalNotes-1; i >= 0; i--) {
+    if (y + 12 > SCREEN_H - 12) break;
+    if (i == selectedNoteIdx) {
+      tft.fillRect(2, y, SCREEN_W - 4, 10, ST77XX_CYAN);
+      tft.setTextColor(ST77XX_BLACK);
+    } else {
+      tft.setTextColor(ST77XX_WHITE);
+    }
+    tft.setCursor(8, y + 1);
+    tft.print(notes[i].name);
+    tft.setTextColor(ST77XX_WHITE);
+    y += 12;
+  }
+  
+  // Bottom hint bar
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
+  tft.setCursor(2, SCREEN_H - 10);
+  tft.print("MENU=More BACK=Home");
+}
 
-  // Print committed buffer
-  int x = TEXT_X, y = 16;
-  for (int i = 0; i < bufLen; i++) {
-    if (inputBuf[i] == '\n') {
+// ── Redraw note view screen ─────────────────────────────
+void redrawNoteView() {
+  tft.fillScreen(ST77XX_BLACK);
+  
+  // Title bar with note name
+  tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, 2);
+  tft.print(notes[selectedNoteIdx].name);
+  
+  // Display note content
+  tft.setTextColor(ST77XX_WHITE);
+  int x = TEXT_X, y = 18;
+  for (int i = 0; i < notes[selectedNoteIdx].contentLen; i++) {
+    if (notes[selectedNoteIdx].content[i] == '\n') {
       x = TEXT_X;
       y += LINE_H;
     } else {
       tft.setCursor(x, y);
-      tft.print(inputBuf[i]);
+      tft.print(notes[selectedNoteIdx].content[i]);
       x += CHAR_W;
       if (x + CHAR_W > SCREEN_W - TEXT_X) {
         x = TEXT_X;
@@ -202,11 +323,48 @@ void redrawDisplay() {
       }
     }
   }
+  
+  // Bottom hint bar
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, SCREEN_H - 10);
+  tft.print("MENU=Edit BACK=List");
+}
 
+// ── Redraw note edit screen ─────────────────────────────
+void redrawNoteEdit() {
+  tft.fillScreen(ST77XX_BLACK);
+  
+  // Title bar
+  tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, 2);
+  tft.print("  Editing...");
+  
+  // Display edit buffer
+  tft.setTextColor(ST77XX_WHITE);
+  int x = TEXT_X, y = 18;
+  for (int i = 0; i < editBufLen; i++) {
+    if (editBuffer[i] == '\n') {
+      x = TEXT_X;
+      y += LINE_H;
+    } else {
+      tft.setCursor(x, y);
+      tft.print(editBuffer[i]);
+      x += CHAR_W;
+      if (x + CHAR_W > SCREEN_W - TEXT_X) {
+        x = TEXT_X;
+        y += LINE_H;
+      }
+    }
+  }
+  
   // Cursor position
-  int cursorX = getCursorX(cursorPos);
-  int cursorY = getCursorY(cursorPos);
-
+  int cursorX = getEditCursorX(editCursorPos);
+  int cursorY = getEditCursorY(editCursorPos);
+  
   // Print pending character (highlighted) at cursor
   if (pendingKey >= 0) {
     char pending = keyMap[pendingKey][pendingIdx];
@@ -217,25 +375,151 @@ void redrawDisplay() {
     tft.setTextColor(ST77XX_WHITE);
     cursorX += CHAR_W;
   }
-
+  
   // Cursor (vertical bar)
   tft.fillRect(cursorX, cursorY, 1, CHAR_H, ST77XX_GREEN);
-
+  
   // Bottom hint bar
-  tft.fillRect(0, SCREEN_W - 12, SCREEN_H, 12, ST77XX_BLACK);
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
   tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
   tft.setCursor(2, SCREEN_H - 10);
-  tft.print("MENU=del BACK=clr");
+  tft.print("MENU=Save BACK=Cancel");
 }
 
-// ── Commit pending char to buffer ─────────────────────
+// ── Redraw note menu screen ─────────────────────────────
+void redrawNoteMenu() {
+  tft.fillScreen(ST77XX_BLACK);
+  
+  // Title bar
+  tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(35, 2);
+  tft.print("Options");
+  
+  // Menu options
+  const char* options[] = {"View", "Edit", "Rename", "Delete"};
+  int numOptions = 4;
+  int y = 30;
+  
+  for (int i = 0; i < numOptions; i++) {
+    if (i == menuSelectedIdx) {
+      tft.fillRect(5, y, SCREEN_W - 10, 12, ST77XX_CYAN);
+      tft.setTextColor(ST77XX_BLACK);
+    } else {
+      tft.setTextColor(ST77XX_WHITE);
+    }
+    tft.setCursor(20, y + 2);
+    tft.print(options[i]);
+    tft.setTextColor(ST77XX_WHITE);
+    y += 16;
+  }
+  
+  // Bottom hint bar
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, SCREEN_H - 10);
+  tft.print("ENTER=Select BACK=Back");
+}
+
+// ── Redraw home screen ───────────────────────────────
+void redrawHomeScreen() {
+  tft.fillScreen(ST77XX_BLACK);
+  
+  // Title bar
+  tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(2);
+  tft.setCursor(20, 3);
+  tft.print("Device");
+  
+  // Welcome message
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(10, 40);
+  tft.print("Welcome!");
+  
+  tft.setCursor(5, 70);
+  tft.print("Press MENU to access");
+  tft.setCursor(5, 85);
+  tft.print("applications");
+  
+  // Bottom hint bar
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, SCREEN_H - 10);
+  tft.print("MENU=Apps");
+}
+
+// ── Redraw app menu screen ───────────────────────────
+void redrawAppMenu() {
+  tft.fillScreen(ST77XX_BLACK);
+  
+  // Title bar
+  tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(35, 5);
+  tft.print("APPS");
+  
+  // Draw app items
+  tft.setTextSize(1);
+  for (int i = 0; i < numApps; i++) {
+    int y = 40 + (i * 30);
+    if (i == selectedApp) {
+      tft.fillRect(5, y, SCREEN_W - 10, 20, ST77XX_CYAN);
+      tft.setTextColor(ST77XX_BLACK);
+    } else {
+      tft.setTextColor(ST77XX_WHITE);
+    }
+    tft.setCursor(20, y + 6);
+    tft.print(apps[i]);
+    tft.setTextColor(ST77XX_WHITE);
+  }
+  
+  // Bottom hint bar
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, SCREEN_H - 10);
+  tft.print("ENTER=Open BACK=Home");
+}
+
+// ── Redraw full display ────────────────────────────────
+void redrawDisplay() {
+  switch(currentScreen) {
+    case HOME_SCREEN:
+      redrawHomeScreen();
+      break;
+    case APP_MENU:
+      redrawAppMenu();
+      break;
+    case NOTEPAD_LIST:
+      redrawNoteList();
+      break;
+    case NOTEPAD_VIEW:
+      redrawNoteView();
+      break;
+    case NOTEPAD_EDIT:
+      redrawNoteEdit();
+      break;
+    case NOTEPAD_MENU:
+      redrawNoteMenu();
+      break;
+  }
+}
+
+// ── Commit pending char to edit buffer ──────────────
 void commitPending() {
   if (pendingKey < 0) return;
-  if (bufLen < MAX_LEN) {
-    memmove(&inputBuf[cursorPos + 1], &inputBuf[cursorPos], bufLen - cursorPos + 1);
-    inputBuf[cursorPos] = keyMap[pendingKey][pendingIdx];
-    bufLen++;
-    cursorPos++;
+  if (editBufLen < NOTE_CONTENT_LEN) {
+    memmove(&editBuffer[editCursorPos + 1], &editBuffer[editCursorPos], editBufLen - editCursorPos + 1);
+    editBuffer[editCursorPos] = keyMap[pendingKey][pendingIdx];
+    editBufLen++;
+    editCursorPos++;
   }
   pendingKey = -1;
   pendingIdx = 0;
@@ -243,6 +527,9 @@ void commitPending() {
 
 // ── Handle a key press ────────────────────────────────
 void handleKey(int keyIndex) {
+  // Only handle in edit mode
+  if (currentScreen != NOTEPAD_EDIT) return;
+  
   unsigned long now = millis();
 
   if (pendingKey == keyIndex && (now - lastKeyTime) < COMMIT_DELAY) {
@@ -282,6 +569,9 @@ void setup() {
   tft.initR(INITR_BLACKTAB);
   tft.setRotation(3);
 
+  // Initialize notes
+  initializeNotes();
+
   redrawDisplay();
   Serial.println("Ready.");
 }
@@ -295,8 +585,8 @@ bool lastMenu         = HIGH;
 void loop() {
   unsigned long now = millis();
 
-  // Auto-commit if key held longer than COMMIT_DELAY
-  if (pendingKey >= 0 && (now - lastKeyTime) >= COMMIT_DELAY) {
+  // Auto-commit if key held longer than COMMIT_DELAY (only in edit mode)
+  if (currentScreen == NOTEPAD_EDIT && pendingKey >= 0 && (now - lastKeyTime) >= COMMIT_DELAY) {
     commitPending();
     redrawDisplay();
   }
@@ -316,21 +606,58 @@ void loop() {
           handleKey(keyIdx);
           Serial.print("Key: ");
           Serial.println(keyMap[keyIdx]);
-        } else {
-          // Navigation keys
+        } else if (currentScreen == NOTEPAD_EDIT) {
+          // Navigation keys (only in edit mode)
           beep();
           switch(i) {
             case 4: // GPA4 = DOWN
-              moveCursorDown();
+              moveEditCursorDown();
               break;
             case 5: // GPA5 = LEFT
-              if (cursorPos > 0) cursorPos--;
+              if (editCursorPos > 0) editCursorPos--;
               break;
             case 6: // GPA6 = RIGHT
-              if (cursorPos < bufLen) cursorPos++;
+              if (editCursorPos < editBufLen) editCursorPos++;
               break;
             case 7: // GPA7 = UP
-              moveCursorUp();
+              moveEditCursorUp();
+              break;
+          }
+          redrawDisplay();
+        } else if (currentScreen == APP_MENU) {
+          // Navigation keys (only in app menu)
+          beep();
+          switch(i) {
+            case 4: // GPA4 = DOWN
+              selectedApp = (selectedApp + 1) % numApps;
+              break;
+            case 7: // GPA7 = UP
+              selectedApp = (selectedApp - 1 + numApps) % numApps;
+              break;
+          }
+          redrawDisplay();
+        } else if (currentScreen == NOTEPAD_LIST) {
+          // Navigation keys in note list
+          beep();
+          switch(i) {
+            case 4: // GPA4 = DOWN
+              selectedNoteIdx = (selectedNoteIdx - 1) % (totalNotes + 1);
+              if (selectedNoteIdx <0) selectedNoteIdx = totalNotes; 
+              break;
+            case 7: // GPA7 = UP
+              selectedNoteIdx = (selectedNoteIdx + 1) % (totalNotes + 1);
+              break;
+          }
+          redrawDisplay();
+        } else if (currentScreen == NOTEPAD_MENU) {
+          // Navigation keys in note menu
+          beep();
+          switch(i) {
+            case 4: // GPA4 = DOWN
+              menuSelectedIdx = (menuSelectedIdx + 1) % 4;
+              break;
+            case 7: // GPA7 = UP
+              menuSelectedIdx = (menuSelectedIdx - 1 + 4) % 4;
               break;
           }
           redrawDisplay();
@@ -345,35 +672,143 @@ void loop() {
   bool curEnter = digitalRead(BTN_ENTER);
   bool curMenu  = digitalRead(BTN_MENU);
 
-   if (lastBack == LOW && curBack == HIGH) {
-    // BACK = delete character at cursor
-    beep(30);
-    commitPending();
-    if (cursorPos > 0) {
-      cursorPos--;
-      memmove(&inputBuf[cursorPos], &inputBuf[cursorPos + 1], bufLen - cursorPos);
-      bufLen--;
-    }
-    redrawDisplay();
-  }
 
   if (lastBack == LOW && curBack == HIGH) {
-    // TODO: MENU = save or discard
     beep(80);
-    commitPending();
+    switch(currentScreen) {
+      case HOME_SCREEN:
+        break;
+      case APP_MENU:
+        currentScreen = HOME_SCREEN;
+        selectedApp = 0;
+        redrawDisplay();
+        break;
+      case NOTEPAD_LIST:
+        currentScreen = HOME_SCREEN;
+        redrawDisplay();
+        break;
+      case NOTEPAD_VIEW:
+        currentScreen = NOTEPAD_LIST;
+        redrawDisplay();
+        break;
+      case NOTEPAD_EDIT:
+        // Discard changes
+        editBufLen = 0;
+        editCursorPos = 0;
+        pendingKey = -1;
+        currentScreen = NOTEPAD_VIEW;
+        redrawDisplay();
+        break;
+      case NOTEPAD_MENU:
+        currentScreen = NOTEPAD_LIST;
+        menuSelectedIdx = 0;
+        redrawDisplay();
+        break;
+    }
   }
 
   if (lastEnter == LOW && curEnter == HIGH) {
-    // ENTER = insert newline at cursor
     beep(50);
-    commitPending();
-    if (bufLen < MAX_LEN) {
-      memmove(&inputBuf[cursorPos + 1], &inputBuf[cursorPos], bufLen - cursorPos + 1);
-      inputBuf[cursorPos] = '\n';
-      bufLen++;
-      cursorPos++;
+    switch(currentScreen) {
+      case HOME_SCREEN:
+        break;
+      case APP_MENU:
+        if (selectedApp == 0) {
+          currentScreen = NOTEPAD_LIST;
+          selectedNoteIdx = totalNotes;
+        }
+        redrawDisplay();
+        break;
+      case NOTEPAD_LIST:
+        if (selectedNoteIdx == totalNotes) {
+          // Create new note
+          createNewNote();
+          strcpy(editBuffer, "");
+          editBufLen = 0;
+          editCursorPos = 0;
+          currentScreen = NOTEPAD_EDIT;
+        } else if (selectedNoteIdx >= 0 && selectedNoteIdx < totalNotes) {
+          // Open note in view mode
+          currentScreen = NOTEPAD_VIEW;
+        }
+        redrawDisplay();
+        break;
+      case NOTEPAD_VIEW:
+        break;
+      case NOTEPAD_EDIT:
+        // ENTER = insert newline
+        commitPending();
+        if (editBufLen < NOTE_CONTENT_LEN) {
+          memmove(&editBuffer[editCursorPos + 1], &editBuffer[editCursorPos], editBufLen - editCursorPos + 1);
+          editBuffer[editCursorPos] = '\n';
+          editBufLen++;
+          editCursorPos++;
+        }
+        redrawDisplay();
+        break;
+      case NOTEPAD_MENU:
+        // Execute selected menu option
+        switch(menuSelectedIdx) {
+          case 0: // View
+            currentScreen = NOTEPAD_VIEW;
+            break;
+          case 1: // Edit
+            strcpy(editBuffer, notes[selectedNoteIdx].content);
+            editBufLen = notes[selectedNoteIdx].contentLen;
+            editCursorPos = 0;
+            pendingKey = -1;
+            currentScreen = NOTEPAD_EDIT;
+            break;
+          case 2: // Rename (placeholder)
+            currentScreen = NOTEPAD_LIST;
+            break;
+          case 3: // Delete
+            deleteNote(selectedNoteIdx);
+            currentScreen = NOTEPAD_LIST;
+            break;
+        }
+        menuSelectedIdx = 0;
+        redrawDisplay();
+        break;
     }
-    redrawDisplay();
+  }
+
+  if (lastMenu == LOW && curMenu == HIGH) {
+    beep(30);
+    switch(currentScreen) {
+      case HOME_SCREEN:
+        currentScreen = APP_MENU;
+        selectedApp = 0;
+        redrawDisplay();
+        break;
+      case APP_MENU:
+        selectedApp = (selectedApp + 1) % numApps;
+        redrawDisplay();
+        break;
+      case NOTEPAD_LIST:
+        // MENU = cycle through notes
+        // selectedNoteIdx = (selectedNoteIdx + 1) % (totalNotes + 1);
+        redrawDisplay();
+        break;
+      case NOTEPAD_VIEW:
+        currentScreen = NOTEPAD_MENU;
+        menuSelectedIdx = 0;
+        redrawDisplay();
+        break;
+      case NOTEPAD_EDIT:
+        // MENU = save note
+        saveNote(selectedNoteIdx);
+        editBufLen = 0;
+        editCursorPos = 0;
+        pendingKey = -1;
+        currentScreen = NOTEPAD_VIEW;
+        redrawDisplay();
+        break;
+      case NOTEPAD_MENU:
+        menuSelectedIdx = (menuSelectedIdx + 1) % 4;
+        redrawDisplay();
+        break;
+    }
   }
 
   lastBack  = curBack;
@@ -382,3 +817,4 @@ void loop() {
 
   delay(10);
 }
+
