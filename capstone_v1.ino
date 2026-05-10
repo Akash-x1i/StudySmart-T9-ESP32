@@ -101,12 +101,17 @@ void redrawDisplay() {
   // Print committed buffer
   int x = TEXT_X, y = 16;
   for (int i = 0; i < bufLen; i++) {
-    tft.setCursor(x, y);
-    tft.print(inputBuf[i]);
-    x += CHAR_W;
-    if (x + CHAR_W > SCREEN_W - TEXT_X) {
+    if (inputBuf[i] == '\n') {
       x = TEXT_X;
       y += LINE_H;
+    } else {
+      tft.setCursor(x, y);
+      tft.print(inputBuf[i]);
+      x += CHAR_W;
+      if (x + CHAR_W > SCREEN_W - TEXT_X) {
+        x = TEXT_X;
+        y += LINE_H;
+      }
     }
   }
 
