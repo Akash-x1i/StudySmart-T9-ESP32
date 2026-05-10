@@ -66,6 +66,8 @@ enum ScreenState {
   WIFI_PROMPT,
   HOME_SCREEN,
   APP_MENU,
+  WIFI_APP,
+  WIFI_NETWORK_LIST,
   NOTEPAD_LIST,
   NOTEPAD_VIEW,
   NOTEPAD_EDIT,
@@ -80,6 +82,14 @@ const char* WIFI_PASS = "aaaaaaaa";
 bool wifiEnabled = false;
 bool wifiConnected = false;
 int wifiPromptOption = 0;  // 0 = yes, 1 = no
+
+const int MAX_WIFI_NETWORKS = 10;
+String wifiNetworkNames[MAX_WIFI_NETWORKS];
+bool wifiNetworkOpen[MAX_WIFI_NETWORKS];
+int wifiNetworkRssi[MAX_WIFI_NETWORKS];
+int wifiNetworkCount = 0;
+int wifiSelectedNetworkIdx = 0;
+String wifiStatusMessage = "";
 
 // ── Note storage ──────────────────────────────────────
 #define MAX_NOTES     10
@@ -115,10 +125,11 @@ int editCursorPos = 0;
 int     pendingKey   = -1;           // keyMap index of key being cycled
 int     pendingIdx   = 0;            // which char in keyMap[pendingKey] is showing
 unsigned long lastKeyTime = 0;
+unsigned long lastClockUpdate = 0;
 
 // ── Apps list ────────────────────────────────────────
-const char* apps[] = {"Notepad"};
-const int numApps = 1;
+const char* apps[] = {"Notepad", "WiFi"};
+const int numApps = 2;
 
 // ── Note management functions ─────────────────────────
 void initializeNotes() {
@@ -174,7 +185,7 @@ bool connectWiFi() {
     return false;
   }
   configTime(0, 0, "pool.ntp.org", "time.nist.gov");
-  setenv("TZ", "UTC0", 1);
+  setenv("TZ", "IST-5:30", 1);
   tzset();
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 5000)) {
@@ -187,7 +198,7 @@ bool getCurrentTimeStrings(char* dateStr, int dateLen, char* timeStr, int timeLe
   struct tm timeinfo;
   if (!getLocalTime(&timeinfo, 1000)) return false;
   strftime(dateStr, dateLen, "%d %b %Y", &timeinfo);
-  strftime(timeStr, timeLen, "%H:%M:%S", &timeinfo);
+  strftime(timeStr, timeLen, "%H:%M", &timeinfo);
   return true;
 }
 
@@ -293,7 +304,7 @@ void redrawNoteList() {
   tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(40, 2);
+  tft.setCursor(62, 2);
   tft.print("Notes");
   
   // Draw create option
@@ -330,7 +341,7 @@ void redrawNoteList() {
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(2, SCREEN_H - 10);
-  tft.print("MENU=More BACK=Home");
+  tft.print("More                  Home");
 }
 
 // ── Redraw note view screen ─────────────────────────────
@@ -341,7 +352,7 @@ void redrawNoteView() {
   tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(2, 2);
+  tft.setCursor(58, 2);
   tft.print(notes[selectedNoteIdx].name);
   
   // Display note content
@@ -367,7 +378,7 @@ void redrawNoteView() {
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(2, SCREEN_H - 10);
-  tft.print("MENU=Edit BACK=List");
+  tft.print("More                  Back");
 }
 
 // ── Redraw note edit screen ─────────────────────────────
@@ -378,8 +389,8 @@ void redrawNoteEdit() {
   tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(2, 2);
-  tft.print("  Editing...");
+  tft.setCursor(44, 2);
+  tft.print("Editing...");
   
   // Display edit buffer
   tft.setTextColor(ST77XX_WHITE);
@@ -422,7 +433,7 @@ void redrawNoteEdit() {
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(2, SCREEN_H - 10);
-  tft.print("MENU=Save BACK=Cancel");
+  tft.print("Save                Cancel");
 }
 
 // ── Redraw note menu screen ─────────────────────────────
@@ -433,7 +444,7 @@ void redrawNoteMenu() {
   tft.fillRect(0, 0, SCREEN_W, 12, ST77XX_BLUE);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(35, 2);
+  tft.setCursor(54, 2);
   tft.print("Options");
   
   // Menu options
@@ -459,48 +470,50 @@ void redrawNoteMenu() {
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(2, SCREEN_H - 10);
-  tft.print("ENTER=Select BACK=Back");
+  tft.print("Select                Back");
 }
 
 // ── Redraw home screen ───────────────────────────────
 void redrawHomeScreen() {
   tft.fillScreen(ST77XX_BLACK);
   
-  // Title bar
-  tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
-  tft.setTextColor(ST77XX_WHITE);
-  tft.setTextSize(2);
-  tft.setCursor(20, 3);
-  tft.print("Device");
+  // // Title bar
+  // tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
+  // tft.setTextColor(ST77XX_WHITE);
+  // tft.setTextSize(2);
+  // tft.setCursor(20, 3);
+  // tft.print("Device");
 
-  char dateStr[20] = "-- -- ----";
-  char timeStr[20] = "--:--:--";
+  char dateStr[20] = "Akash Bauri";
+  char timeStr[20] = "Hello";
   if (wifiConnected) {
     if (!getCurrentTimeStrings(dateStr, sizeof(dateStr), timeStr, sizeof(timeStr))) {
-      strcpy(dateStr, "NTP sync fail");
-      strcpy(timeStr, "--:--:--");
+      strcpy(dateStr, " sync fail");
+      strcpy(timeStr, "Oops!");
     }
   }
 
   // Clock display
   tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(10, 36);
+  tft.setCursor(52, 36);
   tft.print(timeStr);
 
   // Date display
   tft.setTextSize(1);
-  tft.setCursor(10, 62);
+  tft.setCursor(49, 62);
   tft.print(dateStr);
 
   // WiFi status
-  tft.setCursor(10, 80);
   if (wifiConnected) {
-    tft.print("WiFi: Connected");
+    tft.setCursor(53, 80);
+    tft.print("Connected");
   } else if (wifiEnabled) {
-    tft.print("WiFi: Connecting...");
+    tft.setCursor(48, 80);
+    tft.print("Connecting...");
   } else {
-    tft.print("WiFi: Disabled");
+    tft.setCursor(25, 80);
+    tft.print("any wifi available?");
   }
 }
 
@@ -540,6 +553,134 @@ void redrawWifiPrompt() {
   tft.print("Toggle                Skip");
 }
 
+void scanWifiNetworks() {
+  wifiNetworkCount = 0;
+  wifiSelectedNetworkIdx = 0;
+  wifiStatusMessage = "Scanning...";
+  int n = WiFi.scanNetworks();
+  if (n <= 0) {
+    wifiStatusMessage = "No networks found";
+    wifiNetworkCount = 0;
+    return;
+  }
+  wifiNetworkCount = min(n, MAX_WIFI_NETWORKS);
+  for (int i = 0; i < wifiNetworkCount; i++) {
+    wifiNetworkNames[i] = WiFi.SSID(i);
+    wifiNetworkOpen[i] = (WiFi.encryptionType(i) == WIFI_AUTH_OPEN);
+    wifiNetworkRssi[i] = WiFi.RSSI(i);
+  }
+  WiFi.scanDelete();
+  wifiStatusMessage = "Select network";
+}
+
+void connectToSelectedNetwork() {
+  if (wifiSelectedNetworkIdx < 0 || wifiSelectedNetworkIdx >= wifiNetworkCount) {
+    wifiStatusMessage = "No network selected";
+    return;
+  }
+  String ssid = wifiNetworkNames[wifiSelectedNetworkIdx];
+  bool open = wifiNetworkOpen[wifiSelectedNetworkIdx];
+  if (!open && ssid != WIFI_SSID) {
+    wifiStatusMessage = "Locked network";
+    return;
+  }
+  wifiStatusMessage = "Connecting...";
+  WiFi.disconnect(true);
+  WiFi.mode(WIFI_STA);
+  if (open) {
+    WiFi.begin(ssid.c_str());
+  } else {
+    WiFi.begin(WIFI_SSID, WIFI_PASS);
+  }
+  unsigned long start = millis();
+  while (millis() - start < 10000) {
+    if (WiFi.status() == WL_CONNECTED) break;
+    delay(200);
+  }
+  if (WiFi.status() == WL_CONNECTED) {
+    wifiConnected = true;
+    wifiEnabled = true;
+    wifiStatusMessage = String("Connected ") + ssid;
+    configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+    setenv("TZ", "IST-5:30", 1);
+    tzset();
+  } else {
+    wifiConnected = false;
+    wifiStatusMessage = "Connect failed";
+  }
+}
+
+void redrawWifiApp() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(24, 3);
+  tft.print("WiFi Control");
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(10, 30);
+  if (wifiConnected) {
+    tft.print("Status: Connected");
+  } else if (wifiEnabled) {
+    tft.print("Status: Enabled");
+  } else {
+    tft.print("Status: Disabled");
+  }
+
+  tft.setCursor(10, 45);
+  if (wifiConnected) {
+    tft.print(WiFi.SSID());
+  } else {
+    tft.print(wifiStatusMessage);
+  }
+
+  tft.setCursor(10, 65);
+  tft.print("ENTER=Toggle WiFi");
+  tft.setCursor(10, 78);
+  tft.print("MENU=Scan networks");
+  tft.setCursor(10, 91);
+  tft.print("BACK=Apps");
+}
+
+void redrawWifiNetworkList() {
+  tft.fillScreen(ST77XX_BLACK);
+  tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(10, 3);
+  tft.print("WiFi Networks");
+
+  if (wifiNetworkCount == 0) {
+    tft.setTextColor(ST77XX_WHITE);
+    tft.setTextSize(1);
+    tft.setCursor(10, 35);
+    tft.print("No networks found");
+  } else {
+    int y = 30;
+    for (int i = 0; i < wifiNetworkCount && y < SCREEN_H - 20; i++) {
+      if (i == wifiSelectedNetworkIdx) {
+        tft.fillRect(2, y - 2, SCREEN_W - 4, 12, ST77XX_CYAN);
+        tft.setTextColor(ST77XX_BLACK);
+      } else {
+        tft.setTextColor(ST77XX_WHITE);
+      }
+      tft.setCursor(8, y);
+      tft.print(wifiNetworkNames[i]);
+      tft.setCursor(96, y);
+      tft.print(wifiNetworkOpen[i] ? "OPEN" : "LOCK");
+      y += 12;
+    }
+  }
+
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(2, SCREEN_H - 10);
+  tft.print("MENU=Rescan");
+}
+
 void redrawAppMenu() {
   tft.fillScreen(ST77XX_BLACK);
   
@@ -547,7 +688,7 @@ void redrawAppMenu() {
   tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
-  tft.setCursor(35, 5);
+  tft.setCursor(65, 5);
   tft.print("APPS");
   
   // Draw app items
@@ -567,10 +708,10 @@ void redrawAppMenu() {
   
   // Bottom hint bar
   tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
-  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextColor(ST77XX_CYAN);
   tft.setTextSize(1);
   tft.setCursor(2, SCREEN_H - 10);
-  tft.print("ENTER=Open BACK=Home");
+  tft.print("Open                  Home");
 }
 
 // ── Redraw full display ────────────────────────────────
@@ -584,6 +725,12 @@ void redrawDisplay() {
       break;
     case APP_MENU:
       redrawAppMenu();
+      break;
+    case WIFI_APP:
+      redrawWifiApp();
+      break;
+    case WIFI_NETWORK_LIST:
+      redrawWifiNetworkList();
       break;
     case NOTEPAD_LIST:
       redrawNoteList();
@@ -660,6 +807,8 @@ void setup() {
   // Initialize notes
   initializeNotes();
 
+  lastClockUpdate = millis();
+
   // Start on WiFi prompt
   currentScreen = WIFI_PROMPT;
   redrawDisplay();
@@ -679,6 +828,12 @@ void loop() {
   if (currentScreen == NOTEPAD_EDIT && pendingKey >= 0 && (now - lastKeyTime) >= COMMIT_DELAY) {
     commitPending();
     redrawDisplay();
+  }
+
+  // Update clock every minute on home screen
+  if (currentScreen == HOME_SCREEN && (now - lastClockUpdate) >= 60000) {
+    redrawHomeScreen();
+    lastClockUpdate = now;
   }
 
   // ── MCP buttons (detect release) ──
@@ -723,6 +878,18 @@ void loop() {
               break;
             case 7: // GPA7 = UP
               selectedApp = (selectedApp - 1 + numApps) % numApps;
+              break;
+          }
+          redrawDisplay();
+        } else if (currentScreen == WIFI_NETWORK_LIST) {
+          // Navigation keys in WiFi network list
+          beep();
+          switch(i) {
+            case 4: // GPA4 = DOWN
+              wifiSelectedNetworkIdx = (wifiSelectedNetworkIdx + 1) % wifiNetworkCount;
+              break;
+            case 7: // GPA7 = UP
+              wifiSelectedNetworkIdx = (wifiSelectedNetworkIdx - 1 + wifiNetworkCount) % wifiNetworkCount;
               break;
           }
           redrawDisplay();
@@ -779,6 +946,14 @@ void loop() {
         selectedApp = 0;
         redrawDisplay();
         break;
+      case WIFI_APP:
+        currentScreen = APP_MENU;
+        redrawDisplay();
+        break;
+      case WIFI_NETWORK_LIST:
+        currentScreen = WIFI_APP;
+        redrawDisplay();
+        break;
       case NOTEPAD_LIST:
         currentScreen = HOME_SCREEN;
         redrawDisplay();
@@ -820,7 +995,32 @@ void loop() {
         if (selectedApp == 0) {
           currentScreen = NOTEPAD_LIST;
           selectedNoteIdx = totalNotes;
+        }else if(selectedApp == 1){
+          currentScreen = WIFI_APP;
         }
+        redrawDisplay();
+        break;
+      case WIFI_APP:
+        // Toggle WiFi
+        if (wifiEnabled) {
+          WiFi.disconnect(true);
+          wifiEnabled = false;
+          wifiConnected = false;
+          wifiStatusMessage = "Disabled";
+        } else {
+          wifiEnabled = true;
+          wifiStatusMessage = "Enabled";
+          // Try to connect to default network
+          if (connectWiFi()) {
+            wifiStatusMessage = "Connected";
+          } else {
+            wifiStatusMessage = "Connect failed";
+          }
+        }
+        redrawDisplay();
+        break;
+      case WIFI_NETWORK_LIST:
+        connectToSelectedNetwork();
         redrawDisplay();
         break;
       case NOTEPAD_LIST:
@@ -891,6 +1091,15 @@ void loop() {
         break;
       case APP_MENU:
         selectedApp = (selectedApp + 1) % numApps;
+        redrawDisplay();
+        break;
+      case WIFI_APP:
+        scanWifiNetworks();
+        currentScreen = WIFI_NETWORK_LIST;
+        redrawDisplay();
+        break;
+      case WIFI_NETWORK_LIST:
+        scanWifiNetworks();
         redrawDisplay();
         break;
       case NOTEPAD_LIST:
