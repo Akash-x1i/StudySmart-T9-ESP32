@@ -73,6 +73,7 @@ int mcpPinToKeyIndex(int pin) {
 
 char    inputBuf[MAX_LEN + 1] = "";  // committed text
 int     bufLen       = 0;
+int     cursorPos    = 0;
 int     pendingKey   = -1;           // keyMap index of key being cycled
 int     pendingIdx   = 0;            // which char in keyMap[pendingKey] is showing
 unsigned long lastKeyTime = 0;
@@ -81,6 +82,93 @@ void beep(int ms = 30) {
   digitalWrite(BUZZER, HIGH);
   delay(ms);
   digitalWrite(BUZZER, LOW);
+}
+
+int getCursorX(int pos) {
+  int x = TEXT_X;
+  int col = 0;
+  for(int i = 0; i < pos && i < bufLen; i++) {
+    if(inputBuf[i] == '\n') {
+      x = TEXT_X;
+      col = 0;
+    } else {
+      x += CHAR_W;
+      col++;
+      if(col >= CHARS_PER_LINE) {
+        x = TEXT_X;
+        col = 0;
+      }
+    }
+  }
+  return x;
+}
+
+int getCursorY(int pos) {
+  int y = 16;
+  int col = 0;
+  for(int i = 0; i < pos && i < bufLen; i++) {
+    if(inputBuf[i] == '\n') {
+      y += LINE_H;
+      col = 0;
+    } else {
+      col++;
+      if(col >= CHARS_PER_LINE) {
+        y += LINE_H;
+        col = 0;
+      }
+    }
+  }
+  return y;
+}
+
+int getLineStart(int pos) {
+  int start = 0;
+  int col = 0;
+  for(int i = 0; i < pos && i < bufLen; i++) {
+    if(inputBuf[i] == '\n') {
+      start = i + 1;
+      col = 0;
+    } else {
+      col++;
+      if(col >= CHARS_PER_LINE) {
+        start = i + 1;
+        col = 0;
+      }
+    }
+  }
+  return start;
+}
+
+int getLineLength(int start) {
+  int len = 0;
+  int col = 0;
+  for(int i = start; i < bufLen && inputBuf[i] != '\n'; i++) {
+    len++;
+    col++;
+    if(col >= CHARS_PER_LINE) break;
+  }
+  return len;
+}
+
+void moveCursorUp() {
+  if (cursorPos == 0) return;
+  int currentLineStart = getLineStart(cursorPos);
+  if (currentLineStart == 0) return;
+  int prevLineStart = getLineStart(currentLineStart - 1);
+  int column = cursorPos - currentLineStart;
+  int prevLineLen = getLineLength(prevLineStart);
+  cursorPos = prevLineStart + min(column, prevLineLen);
+}
+
+void moveCursorDown() {
+  int currentLineStart = getLineStart(cursorPos);
+  int currentLineLen = getLineLength(currentLineStart);
+  int nextLineStart = currentLineStart + currentLineLen;
+  if (nextLineStart >= bufLen) return;
+  if (inputBuf[nextLineStart] == '\n') nextLineStart++;
+  int column = cursorPos - currentLineStart;
+  int nextLineLen = getLineLength(nextLineStart);
+  cursorPos = nextLineStart + min(column, nextLineLen);
 }
 
 // ── Redraw full display ────────────────────────────────
@@ -115,19 +203,23 @@ void redrawDisplay() {
     }
   }
 
-  // Print pending character (highlighted)
+  // Cursor position
+  int cursorX = getCursorX(cursorPos);
+  int cursorY = getCursorY(cursorPos);
+
+  // Print pending character (highlighted) at cursor
   if (pendingKey >= 0) {
     char pending = keyMap[pendingKey][pendingIdx];
-    tft.fillRect(x, y, CHAR_W, CHAR_H, ST77XX_WHITE);
+    tft.fillRect(cursorX, cursorY, CHAR_W, CHAR_H, ST77XX_WHITE);
     tft.setTextColor(ST77XX_BLACK);
-    tft.setCursor(x, y);
+    tft.setCursor(cursorX, cursorY);
     tft.print(pending);
     tft.setTextColor(ST77XX_WHITE);
-    x += CHAR_W;
+    cursorX += CHAR_W;
   }
 
-  // Cursor
-  tft.fillRect(x, y + CHAR_H - 1, CHAR_W, 1, ST77XX_GREEN);
+  // Cursor (vertical bar)
+  tft.fillRect(cursorX, cursorY, 1, CHAR_H, ST77XX_GREEN);
 
   // Bottom hint bar
   tft.fillRect(0, SCREEN_W - 12, SCREEN_H, 12, ST77XX_BLACK);
@@ -140,8 +232,10 @@ void redrawDisplay() {
 void commitPending() {
   if (pendingKey < 0) return;
   if (bufLen < MAX_LEN) {
-    inputBuf[bufLen++] = keyMap[pendingKey][pendingIdx];
-    inputBuf[bufLen]   = '\0';
+    memmove(&inputBuf[cursorPos + 1], &inputBuf[cursorPos], bufLen - cursorPos + 1);
+    inputBuf[cursorPos] = keyMap[pendingKey][pendingIdx];
+    bufLen++;
+    cursorPos++;
   }
   pendingKey = -1;
   pendingIdx = 0;
@@ -222,6 +316,24 @@ void loop() {
           handleKey(keyIdx);
           Serial.print("Key: ");
           Serial.println(keyMap[keyIdx]);
+        } else {
+          // Navigation keys
+          beep();
+          switch(i) {
+            case 4: // GPA4 = DOWN
+              moveCursorDown();
+              break;
+            case 5: // GPA5 = LEFT
+              if (cursorPos > 0) cursorPos--;
+              break;
+            case 6: // GPA6 = RIGHT
+              if (cursorPos < bufLen) cursorPos++;
+              break;
+            case 7: // GPA7 = UP
+              moveCursorUp();
+              break;
+          }
+          redrawDisplay();
         }
       }
     }
@@ -234,12 +346,13 @@ void loop() {
   bool curMenu  = digitalRead(BTN_MENU);
 
   if (lastMenu == LOW && curMenu == HIGH) {
-    // MENU = delete last character
+    // MENU = delete character at cursor
     beep(30);
     commitPending();
-    if (bufLen > 0) {
+    if (cursorPos > 0) {
+      cursorPos--;
+      memmove(&inputBuf[cursorPos], &inputBuf[cursorPos + 1], bufLen - cursorPos);
       bufLen--;
-      inputBuf[bufLen] = '\0';
     }
     redrawDisplay();
   }
@@ -249,17 +362,20 @@ void loop() {
     beep(80);
     commitPending();
     bufLen = 0;
+    cursorPos = 0;
     inputBuf[0] = '\0';
     redrawDisplay();
   }
 
   if (lastEnter == LOW && curEnter == HIGH) {
-    // ENTER = commit pending + newline (or your custom action)
+    // ENTER = insert newline at cursor
     beep(50);
     commitPending();
     if (bufLen < MAX_LEN) {
-      inputBuf[bufLen++] = '\n';
-      // inputBuf[bufLen]   = '\0';
+      memmove(&inputBuf[cursorPos + 1], &inputBuf[cursorPos], bufLen - cursorPos + 1);
+      inputBuf[cursorPos] = '\n';
+      bufLen++;
+      cursorPos++;
     }
     redrawDisplay();
   }
