@@ -345,8 +345,8 @@ void loop() {
   bool curEnter = digitalRead(BTN_ENTER);
   bool curMenu  = digitalRead(BTN_MENU);
 
-  if (lastMenu == LOW && curMenu == HIGH) {
-    // MENU = delete character at cursor
+   if (lastBack == LOW && curBack == HIGH) {
+    // BACK = delete character at cursor
     beep(30);
     commitPending();
     if (cursorPos > 0) {
@@ -358,13 +358,9 @@ void loop() {
   }
 
   if (lastBack == LOW && curBack == HIGH) {
-    // BACK = clear all
+    // TODO: MENU = save or discard
     beep(80);
     commitPending();
-    bufLen = 0;
-    cursorPos = 0;
-    inputBuf[0] = '\0';
-    redrawDisplay();
   }
 
   if (lastEnter == LOW && curEnter == HIGH) {
