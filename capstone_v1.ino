@@ -2,6 +2,8 @@
 #include <Adafruit_GFX.h>
 #include <Adafruit_ST7735.h>
 #include "MCP23S17.h"
+#include <WiFi.h>
+#include <time.h>
 
 // ── MCP23S17 ──────────────────────────────────────────
 MCP23S17 MCP(22, 0x00, &SPI);
@@ -61,6 +63,7 @@ int mcpPinToKeyIndex(int pin) {
 
 // ── Screen states ────────────────────────────────────
 enum ScreenState {
+  WIFI_PROMPT,
   HOME_SCREEN,
   APP_MENU,
   NOTEPAD_LIST,
@@ -69,8 +72,14 @@ enum ScreenState {
   NOTEPAD_MENU
 };
 
-ScreenState currentScreen = HOME_SCREEN;
+ScreenState currentScreen = WIFI_PROMPT;
 int selectedApp = 0;  // for app menu selection
+
+const char* WIFI_SSID = "Nue";
+const char* WIFI_PASS = "aaaaaaaa";
+bool wifiEnabled = false;
+bool wifiConnected = false;
+int wifiPromptOption = 0;  // 0 = yes, 1 = no
 
 // ── Note storage ──────────────────────────────────────
 #define MAX_NOTES     10
@@ -151,6 +160,35 @@ void saveNote(int idx) {
   if (idx < 0 || idx >= totalNotes) return;
   strcpy(notes[idx].content, editBuffer);
   notes[idx].contentLen = editBufLen;
+}
+
+bool connectWiFi() {
+  WiFi.mode(WIFI_STA);
+  WiFi.begin(WIFI_SSID, WIFI_PASS);
+  unsigned long start = millis();
+  while (millis() - start < 10000) {
+    if (WiFi.status() == WL_CONNECTED) break;
+    delay(200);
+  }
+  if (WiFi.status() != WL_CONNECTED) {
+    return false;
+  }
+  configTime(0, 0, "pool.ntp.org", "time.nist.gov");
+  setenv("TZ", "UTC0", 1);
+  tzset();
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 5000)) {
+    return false;
+  }
+  return true;
+}
+
+bool getCurrentTimeStrings(char* dateStr, int dateLen, char* timeStr, int timeLen) {
+  struct tm timeinfo;
+  if (!getLocalTime(&timeinfo, 1000)) return false;
+  strftime(dateStr, dateLen, "%d %b %Y", &timeinfo);
+  strftime(timeStr, timeLen, "%H:%M:%S", &timeinfo);
+  return true;
 }
 
 void beep(int ms = 30) {
@@ -434,27 +472,74 @@ void redrawHomeScreen() {
   tft.setTextSize(2);
   tft.setCursor(20, 3);
   tft.print("Device");
-  
-  // Welcome message
-  tft.setTextSize(1);
+
+  char dateStr[20] = "-- -- ----";
+  char timeStr[20] = "--:--:--";
+  if (wifiConnected) {
+    if (!getCurrentTimeStrings(dateStr, sizeof(dateStr), timeStr, sizeof(timeStr))) {
+      strcpy(dateStr, "NTP sync fail");
+      strcpy(timeStr, "--:--:--");
+    }
+  }
+
+  // Clock display
+  tft.setTextSize(2);
   tft.setTextColor(ST77XX_WHITE);
-  tft.setCursor(10, 40);
-  tft.print("Welcome!");
-  
-  tft.setCursor(5, 70);
-  tft.print("Press MENU to access");
-  tft.setCursor(5, 85);
-  tft.print("applications");
-  
-  // Bottom hint bar
-  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
-  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(10, 36);
+  tft.print(timeStr);
+
+  // Date display
   tft.setTextSize(1);
-  tft.setCursor(2, SCREEN_H - 10);
-  tft.print("MENU=Apps");
+  tft.setCursor(10, 62);
+  tft.print(dateStr);
+
+  // WiFi status
+  tft.setCursor(10, 80);
+  if (wifiConnected) {
+    tft.print("WiFi: Connected");
+  } else if (wifiEnabled) {
+    tft.print("WiFi: Connecting...");
+  } else {
+    tft.print("WiFi: Disabled");
+  }
 }
 
-// ── Redraw app menu screen ───────────────────────────
+// ── Redraw WiFi prompt screen ────────────────────────
+void redrawWifiPrompt() {
+  tft.fillScreen(ST77XX_BLACK);
+
+  tft.fillRect(0, 0, SCREEN_W, 20, ST77XX_BLUE);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setTextSize(1);
+  tft.setCursor(12, 3);
+  tft.print("WiFi Setup");
+
+  tft.setTextSize(1);
+  tft.setTextColor(ST77XX_WHITE);
+  tft.setCursor(10, 35);
+  tft.print("Enable WiFi?");
+
+  int y = 60;
+  const char* options[] = {"Yes", "No"};
+  for (int i = 0; i < 2; i++) {
+    if (wifiPromptOption == i) {
+      tft.fillRect(10, y - 2, SCREEN_W - 20, 14, ST77XX_CYAN);
+      tft.setTextColor(ST77XX_BLACK);
+    } else {
+      tft.setTextColor(ST77XX_WHITE);
+    }
+    tft.setCursor(20, y);
+    tft.print(options[i]);
+    y += 18;
+  }
+
+  tft.setTextColor(ST77XX_CYAN);
+  tft.fillRect(0, SCREEN_H - 12, SCREEN_W, 12, ST77XX_BLACK);
+  tft.setTextSize(1);
+  tft.setCursor(2, SCREEN_H - 10);
+  tft.print("Toggle                Skip");
+}
+
 void redrawAppMenu() {
   tft.fillScreen(ST77XX_BLACK);
   
@@ -491,6 +576,9 @@ void redrawAppMenu() {
 // ── Redraw full display ────────────────────────────────
 void redrawDisplay() {
   switch(currentScreen) {
+    case WIFI_PROMPT:
+      redrawWifiPrompt();
+      break;
     case HOME_SCREEN:
       redrawHomeScreen();
       break;
@@ -572,6 +660,8 @@ void setup() {
   // Initialize notes
   initializeNotes();
 
+  // Start on WiFi prompt
+  currentScreen = WIFI_PROMPT;
   redrawDisplay();
   Serial.println("Ready.");
 }
@@ -676,6 +766,12 @@ void loop() {
   if (lastBack == LOW && curBack == HIGH) {
     beep(80);
     switch(currentScreen) {
+      case WIFI_PROMPT:
+        wifiEnabled = false;
+        wifiConnected = false;
+        currentScreen = HOME_SCREEN;
+        redrawDisplay();
+        break;
       case HOME_SCREEN:
         break;
       case APP_MENU:
@@ -710,6 +806,14 @@ void loop() {
   if (lastEnter == LOW && curEnter == HIGH) {
     beep(50);
     switch(currentScreen) {
+      case WIFI_PROMPT:
+        wifiEnabled = (wifiPromptOption == 0);
+        if (wifiEnabled) {
+          wifiConnected = connectWiFi();
+        }
+        currentScreen = HOME_SCREEN;
+        redrawDisplay();
+        break;
       case HOME_SCREEN:
         break;
       case APP_MENU:
@@ -776,6 +880,10 @@ void loop() {
   if (lastMenu == LOW && curMenu == HIGH) {
     beep(30);
     switch(currentScreen) {
+      case WIFI_PROMPT:
+        wifiPromptOption = (wifiPromptOption + 1) % 2;
+        redrawDisplay();
+        break;
       case HOME_SCREEN:
         currentScreen = APP_MENU;
         selectedApp = 0;
@@ -786,8 +894,6 @@ void loop() {
         redrawDisplay();
         break;
       case NOTEPAD_LIST:
-        // MENU = cycle through notes
-        // selectedNoteIdx = (selectedNoteIdx + 1) % (totalNotes + 1);
         redrawDisplay();
         break;
       case NOTEPAD_VIEW:
