@@ -433,7 +433,7 @@ void redrawNoteEdit() {
   tft.setTextColor(ST77XX_WHITE);
   tft.setTextSize(1);
   tft.setCursor(2, SCREEN_H - 10);
-  tft.print("Save                Cancel");
+  tft.print("Save                  Back");
 }
 
 // ── Redraw note menu screen ─────────────────────────────
@@ -964,10 +964,14 @@ void loop() {
         break;
       case NOTEPAD_EDIT:
         // Discard changes
-        editBufLen = 0;
-        editCursorPos = 0;
-        pendingKey = -1;
-        currentScreen = NOTEPAD_VIEW;
+        commitPending();
+        if (editCursorPos > 0) {
+          editCursorPos--;
+          memmove(&editBuffer[editCursorPos], &editBuffer[editCursorPos + 1], editBufLen - editCursorPos);
+          editBufLen--;
+        }else{
+          currentScreen = NOTEPAD_VIEW;
+        }
         redrawDisplay();
         break;
       case NOTEPAD_MENU:
